@@ -7,7 +7,7 @@ sys.path.append(os.path.abspath("../Telegram-Kisaragi-Bot"))
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, JobQueue
-from ollama import chat, ChatResponse
+from ollama import chat, ChatResponse, Client
 
 # Load environment variables
 load_dotenv("../Telegram-Kisaragi-Bot/bot/tekkit.env")
@@ -72,8 +72,8 @@ def get_conversation_history(user_id, limit=5):  # Changed session_id to user_id
 def query_ollama_with_context(user_id, user_message, model="smallthinker:3b"):
     conversation_history = get_conversation_history(user_id)
     conversation_history.append({'role': 'user', 'content': user_message})
-    
-    client = Client(timeout=60)  # Increase timeout to 60 seconds (adjust as needed)
+
+    client = Client(host='http://localhost:11434', timeout=60)  # Define Client here
     retries = 3
     delay = 1
 
@@ -94,6 +94,7 @@ def query_ollama_with_context(user_id, user_message, model="smallthinker:3b"):
                 return "Sorry, there was an error processing your request."
 
     return "Sorry, there was an error processing your request."
+
 
 #rank system
 RANK_DB_PATH = "../Telegram-Kisaragi-Bot/bot/ranks.sqlite3"
