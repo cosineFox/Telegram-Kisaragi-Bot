@@ -3,14 +3,14 @@ import sys
 import sqlite3
 import os
 import datetime
-sys.path.append(os.path.abspath("../code"))
+sys.path.append(os.path.abspath("../Telegram-Kisaragi-Bot"))
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, JobQueue
 from ollama import chat, ChatResponse
 
 # Load environment variables
-load_dotenv("../code/bot/tekkit.env")
+load_dotenv("../Telegram-Kisaragi-Bot/bot/tekkit.env")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     print("Error: TELEGRAM_BOT_TOKEN not found in .env file.")
@@ -26,7 +26,7 @@ logging.getLogger("telegram.ext").setLevel(logging.ERROR)
 print("Bot is running...")
 
 # Initialize SQLite database
-DB_PATH = "../code/bot/conversations.sqlite3"
+DB_PATH = "../Telegram-Kisaragi-Bot/bot/conversations.sqlite3"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -96,7 +96,7 @@ def query_ollama_with_context(user_id, user_message, model="smallthinker:3b"):
     return "Sorry, there was an error processing your request."
 
 #rank system
-RANK_DB_PATH = "../code/bot/ranks.sqlite3"
+RANK_DB_PATH = "../Telegram-Kisaragi-Bot/bot/ranks.sqlite3"
 rank_conn = sqlite3.connect(RANK_DB_PATH, check_same_thread=False)
 rank_cursor = rank_conn.cursor()
 
