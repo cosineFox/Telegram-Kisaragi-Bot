@@ -3,12 +3,12 @@ import sys
 import sqlite3
 import os
 import datetime
-import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.append(os.path.abspath("../Telegram-Kisaragi-Bot"))
 from dotenv import load_dotenv
 
-# PTB v20+ imports
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -32,9 +32,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.ERROR)
 print("Bot is running...")
 
-# ──────────────────────────────────────────────────────────────────────────
-#                          Database Setup
-# ──────────────────────────────────────────────────────────────────────────
 DB_PATH = "../Telegram-Kisaragi-Bot/bot/conversations.sqlite3"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -42,7 +39,7 @@ cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS conversation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT,
+    user_id TEXT,
     user_message TEXT,
     bot_response TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -50,79 +47,6 @@ CREATE TABLE IF NOT EXISTS conversation (
 """)
 conn.commit()
 
-active_talk_sessions = {}
-last_activity = {}
-
-def save_conversation(user_id, user_message, bot_response):
-    cursor.execute("""
-        INSERT INTO conversation (session_id, user_message, bot_response)
-        VALUES (?, ?, ?)
-    """, (user_id, user_message, bot_response))
-    conn.commit()
-
-def get_conversation_history(user_id, limit=5):
-    cursor.execute("""
-        SELECT user_message, bot_response FROM conversation
-        WHERE session_id = ?
-        ORDER BY timestamp DESC
-        LIMIT ?
-    """, (user_id, limit))
-    rows = cursor.fetchall()
-    history = []
-    for usr_msg, bot_msg in reversed(rows):
-        history.append({'role': 'user', 'content': usr_msg})
-        history.append({'role': 'assistant', 'content': bot_msg})
-    return history
-
-# ──────────────────────────────────────────────────────────────────────────
-#                      Ollama Query + Context
-# ──────────────────────────────────────────────────────────────────────────
-async def query_ollama_with_context(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_id: str,
-    user_message: str,
-    model: str = "smallthinker:3b"
-) -> str:
-    conversation_history = get_conversation_history(user_id)
-    conversation_history.append({'role': 'user', 'content': user_message})
-
-    client = Client(host='http://localhost:11434', timeout=60)
-    retries = 3
-    delay = 1
-
-    while retries > 0:
-        try:
-            # Show "typing" action
-            await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
-
-            # Query Ollama
-            response: ChatResponse = client.chat(
-                model=model,
-                messages=conversation_history,
-                stream=False
-            )
-            bot_response = response.message.content
-
-            # Save the conversation
-            save_conversation(user_id, user_message, bot_response)
-            return bot_response
-
-        except Exception as e:
-            print(f"Error querying Ollama: {str(e)}")
-            retries -= 1
-            if retries > 0:
-                print(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                return "Sorry, there was an error processing your request."
-
-    return "Sorry, there was an error processing your request."
-
-# ──────────────────────────────────────────────────────────────────────────
-#                           Rank System
-# ──────────────────────────────────────────────────────────────────────────
 RANK_DB_PATH = "../Telegram-Kisaragi-Bot/bot/ranks.sqlite3"
 rank_conn = sqlite3.connect(RANK_DB_PATH, check_same_thread=False)
 rank_cursor = rank_conn.cursor()
@@ -136,6 +60,38 @@ CREATE TABLE IF NOT EXISTS user_ranks (
 )
 """)
 rank_conn.commit()
+
+active_talk_sessions = {}
+executor = ThreadPoolExecutor()
+client = Client(host='http://localhost:11434', timeout=60)
+
+def save_conversation(user_id, user_message, bot_response):
+    cursor.execute("""
+        INSERT INTO conversation (user_id, user_message, bot_response)
+        VALUES (?, ?, ?)
+    """, (user_id, user_message, bot_response))
+    conn.commit()
+
+async def save_conversation_async(user_id, user_message, bot_response):
+    await asyncio.get_event_loop().run_in_executor(
+        None,
+        save_conversation,
+        user_id, user_message, bot_response
+    )
+
+def get_conversation_history(user_id, limit=5):
+    cursor.execute("""
+        SELECT user_message, bot_response FROM conversation
+        WHERE user_id = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+    """, (user_id, limit))
+    rows = cursor.fetchall()
+    history = []
+    for usr_msg, bot_msg in reversed(rows):
+        history.append({'role': 'user', 'content': usr_msg})
+        history.append({'role': 'assistant', 'content': bot_msg})
+    return history
 
 def add_or_update_user(user_id, username):
     rank_cursor.execute("""
@@ -153,8 +109,8 @@ def update_xp(user_id, username):
     result = rank_cursor.fetchone()
     if result:
         xp, level = result
-        xp += 10
-        if xp >= 100:
+        xp += 10  # You can adjust the XP gain here
+        if xp >= 100:  # You can adjust the level-up threshold here
             xp = 0
             level += 1
         rank_cursor.execute("""
@@ -181,9 +137,71 @@ def get_leaderboard(limit=10):
     """, (limit,))
     return rank_cursor.fetchall()
 
-# ──────────────────────────────────────────────────────────────────────────
-#                          Bot Command Handlers
-# ──────────────────────────────────────────────────────────────────────────
+async def query_model(user_message: str, user_id: str) -> str:
+    history = get_conversation_history(user_id)  # Retrieve user conversation history
+
+    try:
+        response = client.chat(
+            model="smallthinker:3b",
+            messages=[
+                {"role": "system", "content": "You are Kisaragi, a playful fox-girl maid who loves helping Master with tasks. Stay polite, charming, and maintain your personality."},
+                *history,
+                {"role": "user", "content": user_message}
+            ],
+            stream=False
+        )
+        return response.message.content
+
+    except Exception as e:
+        logging.error(f"Error querying Smallthinker model: {e}")
+        return "Sorry, I encountered an error processing your request."
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    username = update.effective_user.username or "Anonymous"
+    user_message = update.message.text
+
+    # Update XP whenever a message is processed
+    update_xp(user_id, username)
+
+    if user_id in active_talk_sessions.get(str(update.effective_chat.id), set()):
+        # Indicate the bot is typing
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+
+        bot_response = await query_model(user_message, user_id)
+        await save_conversation_async(user_id, user_message, bot_response)
+        await update.message.reply_text(f"**{bot_response}**", parse_mode="markdown")
+
+async def talk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session_id = str(update.effective_chat.id)
+    user_id = str(update.effective_user.id)
+
+    if session_id not in active_talk_sessions:
+        active_talk_sessions[session_id] = set()
+
+    active_talk_sessions[session_id].add(user_id)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="I'm ready to chat, Master! (ﾉ◕ヮ◕)ﾉ*:･ﾟ✧"
+    )
+
+async def endtalk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session_id = str(update.effective_chat.id)
+    user_id = str(update.effective_user.id)
+
+    if session_id in active_talk_sessions and user_id in active_talk_sessions[session_id]:
+        active_talk_sessions[session_id].remove(user_id)
+        if not active_talk_sessions[session_id]:
+            del active_talk_sessions[session_id]
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="It was a great talk, Master! (´｡• ᵕ •｡`)")
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="You're not in a conversation with me, Master! Use /talk to start chatting! (・・；)")
+
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     leaderboard_data = get_leaderboard()
     if leaderboard_data:
@@ -194,100 +212,15 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No leaderboard data available yet!")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Hi, I'm Kisaragi! Use /talk to start chatting, /endtalk when you’re done, and /rank to see your rank!"
-    )
-
-async def talk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    session_id = str(update.effective_chat.id)
-    user_id = str(update.effective_user.id)
-
-    if session_id not in active_talk_sessions:
-        active_talk_sessions[session_id] = []
-    active_talk_sessions[session_id].append(user_id)
-
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="I'm ready to chat! (ﾉ◕ヮ◕)ﾉ*:･ﾟ✧"
-    )
-
-async def check_idle_users(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.datetime.now()
-    for (session_id, user_id), last_active in list(last_activity.items()):
-        if now - last_active > datetime.timedelta(minutes=5):
-            try:
-                active_talk_sessions[session_id].remove(user_id)
-                del last_activity[(session_id, user_id)]
-                await context.bot.send_message(
-                    chat_id=session_id,
-                    text=f"Ending /talk session for {user_id} due to inactivity."
-                )
-            except (KeyError, ValueError):
-                pass
-
-# ──────────────────────────────────────────────────────────────────────────
-#                       handle_message (only one!)
-# ──────────────────────────────────────────────────────────────────────────
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    username = update.effective_user.username or "Anonymous"
-    user_message = update.message.text
-    session_id = str(update.effective_chat.id)
-
-    # Always update XP
-    update_xp(user_id, username)
-
-    # Only respond if user is in /talk
-    if user_id in active_talk_sessions.get(session_id, []):
-        last_activity[(session_id, user_id)] = datetime.datetime.now()
-
-        # Call the async query function
-        bot_response = await query_ollama_with_context(
-            update, context, user_id, user_message
-        )
-        formatted_response = f"**{bot_response}**"
-        await update.message.reply_text(formatted_response, parse_mode="markdown")
-
-async def rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    rank_info = get_user_rank(user_id)
-    await update.message.reply_text(rank_info)
-
-async def endtalk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    session_id = str(update.effective_chat.id)
-    user_id = str(update.effective_user.id)
-
-    if session_id in active_talk_sessions:
-        try:
-            active_talk_sessions[session_id].remove(user_id)
-        except ValueError:
-            pass
-        if not active_talk_sessions[session_id]:
-            del active_talk_sessions[session_id]
-
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="It was a great talk!"
-    )
-
-# ──────────────────────────────────────────────────────────────────────────
-#                        Main Application
-# ──────────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    application = ApplicationBuilder().token(TOKEN).build()
+    try:
+        application = ApplicationBuilder().token(TOKEN).build()
 
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('talk', talk))
-    application.add_handler(CommandHandler('endtalk', endtalk))
-    application.add_handler(CommandHandler('rank', rank))
-    application.add_handler(CommandHandler('leaderboard', leaderboard))
+        application.add_handler(CommandHandler('talk', talk))
+        application.add_handler(CommandHandler('endtalk', endtalk))
+        application.add_handler(CommandHandler('leaderboard', leaderboard))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Catch all non-command text
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    job_queue: JobQueue = application.job_queue
-    job_queue.run_repeating(check_idle_users, interval=60, first=60)
-
-    application.run_polling()
+        application.run_polling()
+    finally:
+        executor.shutdown(wait=True)
