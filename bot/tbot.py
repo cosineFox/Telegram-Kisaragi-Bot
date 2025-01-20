@@ -157,6 +157,10 @@ async def query_model(user_message: str, user_id: str) -> str:
         return "Sorry, I encountered an error processing your request."
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        # Ignore updates without messages or text
+        return
+
     user_id = str(update.effective_user.id)
     username = update.effective_user.username or "Anonymous"
     user_message = update.message.text
