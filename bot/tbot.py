@@ -2,23 +2,20 @@ import logging
 import sys
 import sqlite3
 import os
-import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-
-sys.path.append(os.path.abspath("../Telegram-Kisaragi-Bot"))
 from dotenv import load_dotenv
 
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    filters, ContextTypes, JobQueue
+    filters, ContextTypes
 )
 
 from ollama import chat, ChatResponse, Client
 
-load_dotenv("../Telegram-Kisaragi-Bot/bot/tekkit.env")
+load_dotenv("tekkit.env")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     print("Error: TELEGRAM_BOT_TOKEN not found in .env file.")
@@ -28,11 +25,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.WARNING
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.ERROR)
 print("Bot is running...")
 
-DB_PATH = "../Telegram-Kisaragi-Bot/bot/conversations.sqlite3"
+DB_PATH = "conversations.sqlite3"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -47,7 +43,7 @@ CREATE TABLE IF NOT EXISTS conversation (
 """)
 conn.commit()
 
-RANK_DB_PATH = "../Telegram-Kisaragi-Bot/bot/ranks.sqlite3"
+RANK_DB_PATH = "ranks.sqlite3"
 rank_conn = sqlite3.connect(RANK_DB_PATH, check_same_thread=False)
 rank_cursor = rank_conn.cursor()
 
@@ -109,8 +105,8 @@ def update_xp(user_id, username):
     result = rank_cursor.fetchone()
     if result:
         xp, level = result
-        xp += 10  # You can adjust the XP gain here
-        if xp >= 100:  # You can adjust the level-up threshold here
+        xp += 10  # XP gain
+        if xp >= 100:  # Level-up threshold
             xp = 0
             level += 1
         rank_cursor.execute("""
@@ -142,9 +138,9 @@ async def query_model(user_message: str, user_id: str) -> str:
 
     try:
         response = client.chat(
-            model="smallthinker:3b",
+            model="deepseek-r1:8b",
             messages=[
-                {"role": "system", "content": "You are Kisaragi, a playful fox-girl maid who loves helping Master with tasks. Stay polite, charming, and maintain your personality."},
+                {"role": "system", "content": "You are Kisaragi, a playful fox-girl maid who loves helping Master with tasks. Stay polite, charming, and maintain your personality. You do not need to show me your thought process, just present the final result."},
                 *history,
                 {"role": "user", "content": user_message}
             ],
@@ -153,12 +149,31 @@ async def query_model(user_message: str, user_id: str) -> str:
         return response.message.content
 
     except Exception as e:
-        logging.error(f"Error querying Smallthinker model: {e}")
+        logging.error(f"Error querying model: {e}")
         return "Sorry, I encountered an error processing your request."
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    username = update.effective_user.username or "Anonymous"
+
+    # Add or update the user in the rank database
+    add_or_update_user(user_id, username)
+
+    # Send a welcome message
+    welcome_message = (
+        f"Hello, {username}! (≧◡≦)\n"
+        "I'm Kisaragi, your playful fox-girl maid bot! How can I assist you today? 🦊\n\n"
+        "You can use the following commands:\n"
+        "- `/talk`: Start a conversation with me.\n"
+        "- `/endtalk`: End the current conversation.\n"
+        "- `/leaderboard`: View the top users.\n"
+        "- `/rank`: Check your rank and XP.\n\n"
+        "Let's get started! (ﾉ◕ヮ◕)ﾉ*:･ﾟ✧"
+    )
+    await update.message.reply_text(welcome_message, parse_mode="markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
-        # Ignore updates without messages or text
         return
 
     user_id = str(update.effective_user.id)
@@ -200,11 +215,18 @@ async def endtalk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="It was a great talk, Master! (´｡• ᵕ •｡`)")
+            text="It was a great talk, Master! (´｡• ᵕ •｡`)"
+        )
     else:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="You're not in a conversation with me, Master! Use /talk to start chatting! (・・；)")
+            text="You're not in a conversation with me, Master! Use /talk to start chatting! (・・；)"
+        )
+
+async def rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    rank_info = get_user_rank(user_id)
+    await update.message.reply_text(rank_info, parse_mode="markdown")
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     leaderboard_data = get_leaderboard()
@@ -220,9 +242,11 @@ if __name__ == '__main__':
     try:
         application = ApplicationBuilder().token(TOKEN).build()
 
+        application.add_handler(CommandHandler('start', start))  # Start command
         application.add_handler(CommandHandler('talk', talk))
         application.add_handler(CommandHandler('endtalk', endtalk))
         application.add_handler(CommandHandler('leaderboard', leaderboard))
+        application.add_handler(CommandHandler('rank', rank))  # Rank command
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
         application.run_polling()
